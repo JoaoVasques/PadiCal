@@ -1,0 +1,504 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Windows.Forms;
+using System.Runtime.Remoting.Channels;
+using System.Runtime.Remoting.Channels.Http;
+using System.Runtime.Remoting.Messaging;
+using CommonTypes;
+using System.Net.Sockets;
+using System.Threading;
+using System.Runtime.Remoting.Channels.Tcp;
+using System.Diagnostics;
+
+namespace PuppetMaster {
+    public partial class PadiCalTitle : Form {
+        List<ReservationView> reservationList;
+        UserView currentUser;
+        String currentMenu = null;
+
+        //key = name -> Tuple(ip,port)
+        Dictionary<String, Tuple<String, String>> servers = new Dictionary<String, Tuple<String, String>>();
+        Dictionary<String, Tuple<String, String>> users = new Dictionary<string, Tuple<string, String>>();
+
+        String address = "tcp://localhost:{0}/{1}";
+
+        TcpChannel channel = new TcpChannel();
+        /************************************************************************/
+        /*  Delegates - Async Calls
+        /************************************************************************/
+
+        public delegate bool UserRegistrationDelegate(String name, String ip, String port);
+
+        public PadiCalTitle() {
+            this.currentMenu = "Main";
+            ChannelServices.RegisterChannel(channel, true);
+            reservationList = new List<ReservationView>();
+            currentUser = null;
+            InitializeComponent();
+        }
+
+
+        private void BackToMainMenuButton_Click(object sender, EventArgs e) {
+
+
+            Button1.Text = "Read Trace File";
+            Button2.Text = "Client Menu";
+            Button3.Text = "Server Menu";
+
+            Button1.Visible = true;
+            Button2.Visible = true;
+            Button3.Visible = true;
+
+            Button1.Enabled = true;
+            Button2.Enabled = true;
+            Button3.Enabled = true;
+
+            MenuLabel.Text = "Main Menu";
+            this.currentMenu = "Main";
+            BackToMainMenuButton.Enabled = false;
+            Label1.Text = "";
+            Label1.Visible = false;
+            CreateReservationGroupBox.Visible = false;
+            return;
+        }
+
+        private void Button1_Click(object sender, EventArgs e) {
+            /**
+             *Changes to Read Trace File Menu 
+             */
+
+            if (this.currentMenu.Equals("Main")) {
+                this.currentMenu = "Read Trace File";
+                MenuLabel.Text = "Read Trace File Menu";
+                Button2.Enabled = false;
+                Button3.Enabled = false;
+                BackToMainMenuButton.Enabled = true;
+                return;
+            }
+
+            if (this.currentMenu.Equals("Server")) {
+                /************************************************************************/
+                /*Calls server remote method to get current ticket number
+                /************************************************************************/
+                int ticketNumber = -1;
+                Thread ticketThread = new Thread(delegate() {
+                        ticketNumber = GetTicketNumber(this.Label1);
+                    }
+                     );
+                ticketThread.Name = "GetTicketNumberThread";
+                ticketThread.Start();
+                ticketThread.Join();
+
+                Label1.Text = "Ticket number: " + ticketNumber;
+                Label1.Visible = true;
+                return;
+            }
+
+            /************************************************************************/
+            /*          creates a reservation                                                                      
+            /************************************************************************/
+
+            if (this.currentMenu.Equals("Client")) {
+                FillUsersCheckList(this.currentUser.getName());
+                CreateReservationGroupBox.Visible = true;
+                return;
+
+            }
+        }
+
+        private void Button2_Click(object sender, EventArgs e) {
+            /**
+             *Changes to Client Menu 
+            */
+            if (this.currentMenu.Equals("Main")) {
+
+                Button1.Enabled = false;
+                Button3.Enabled = false;
+
+                this.currentMenu = "Client";
+                MenuLabel.Text = "Client Menu";
+
+                ClientNameLabel.Visible = true;
+                ClientNameTextBox.Visible = true;
+                ClientNameOKButton.Visible = true;
+                ClientNameOKButton.Enabled = true;
+
+                return;
+            }
+
+            /************************************************************************/
+            /*    Get registered clients                                                                 
+            /************************************************************************/
+            if (this.currentMenu.Equals("Server")) {
+                if (Label1.Visible == true)
+                    Label1.Visible = false;
+
+                GetRegisteredClients();
+                return;
+
+            }
+
+            /************************************************************************/
+            /*  Shows known users
+            /************************************************************************/
+            if (this.currentMenu.Equals("Client")) {
+
+                GroupBox2.Visible = true;
+                ShowKnownUsers(currentUser);
+                return;
+            }
+
+        }
+
+        private void Button3_Click(object sender, EventArgs e) {
+            /**
+             *Changes to Server Menu 
+            */
+            if (this.currentMenu.Equals("Main")) {
+
+                this.currentMenu = "Server";
+                MenuLabel.Text = "Server Menu";
+                Button1.Text = "Get Ticket Number";
+                Button2.Text = "Get Registered Clients";
+                Button3.Text = "Get Active Replicas";
+                BackToMainMenuButton.Enabled = true;
+                return;
+            }
+
+            /************************************************************************/
+            /*  Get Active Replicas
+            /************************************************************************/
+
+            if (this.currentMenu.Equals("Server")) {
+                if (Label1.Visible == true)
+                    Label1.Visible = false;
+
+                GetActiveReplicas();
+                return;
+            }
+
+            if (this.currentMenu.Equals("Client")) {
+                GetUserInformation();
+                return;
+            }
+        }
+
+        private void CreateButton_Click(object sender, EventArgs e) {
+            /************************************************************************/
+            /*Calls client's remote method to create and disseminate information
+             * Calls remote method the know all known users to the client
+             * Launches a window that has debug info about the created reservation
+            /************************************************************************/
+
+            ReservationView reservationInfo = GetReservationInfo(this.currentUser.getName());
+
+            CreateReservation(reservationInfo.getDescription(), reservationInfo.getSlotList(), reservationInfo.getParticipants(), reservationInfo.getCreator());
+            CreateReservationGroupBox.Visible = false;
+            DescriptionTextBox.Text = "";
+            UsersCheckBoxList.Items.Clear();
+
+        }
+
+        /************************************************************************/
+        /* Gets the text from the text box and calls a remote method to see if the user
+         * exists in the system
+        /************************************************************************/
+        private String UserLogin(String userName) {
+
+            ServerInterface remote = Server.Server.GetMaster(servers["Master"].Item2);
+
+            bool isRegistered = remote.IsRegistered(userName);
+
+
+            if (isRegistered.Equals(true))
+                return userName;
+            return null;
+        }
+
+        private void CreateReservation(String description, List<ReservationSlot> slots, List<UserView> participants, String creator) {
+
+            String url = GetUser(creator);
+            UserInterface remote = (UserInterface)Activator.GetObject(typeof(UserInterface), url);
+
+            remote.CreateReservation(description, participants, slots, creator, Server.Server.GetMaster(servers["Master"].Item2));
+        }
+
+        private int GetTicketNumber(Label lb) {
+
+            ServerInterface remote = Server.Server.GetMaster(servers["Master"].Item2);
+
+            int number = remote.GetTicketNumber();
+            return number;
+        }
+
+        private void ShowKnownUsers(UserView user) {
+
+            String url = GetUser(user.getName());
+            UserInterface remote = (UserInterface)Activator.GetObject(typeof(UserInterface), url);
+
+            Dictionary<CommonTypes.UserView, int> knownUsers = remote.getKnownUsers();
+
+            foreach (KeyValuePair<CommonTypes.UserView, int> iter in knownUsers) {
+                String knownUserFormat = "User name: " + iter.Key.getName() + "  Trust: " + iter.Value;
+                Box2ListBox.Items.Add(knownUserFormat);
+            }
+
+            Box2Title.Text = "Known Users";
+            GroupBox2.Visible = true;
+        }
+
+        private void GetRegisteredClients() {
+            /************************************************************************/
+            /* Call server remote method to get all the registered clients
+            /************************************************************************/
+
+            Box2Title.Text = "Registered Users";
+
+            ServerInterface remote = Server.Server.GetMaster(servers["Master"].Item2);
+
+            List<CommonTypes.UserView> registeredUsers = remote.GetRegisteredClients();
+
+            foreach (CommonTypes.UserView u in registeredUsers) {
+                Box2ListBox.Items.Add(u.getName());
+            }
+
+            GroupBox2.Visible = true;
+        }
+
+
+        private void GetActiveReplicas() {
+            /************************************************************************/
+            /* Calls server remote method to get all active replicas
+            /************************************************************************/
+
+            Box2Title.Text = "Active Replicas";
+            Box2Label.Text = "Active Replicas:";
+            GroupBox2.Visible = true;
+        }
+
+        private void ClientNameOKButton_Click(object sender, EventArgs e) {
+            String user = ClientNameTextBox.Text;
+            ClientNameTextBox.ForeColor = System.Drawing.Color.Black;
+
+            Thread userLoginThread = new Thread(delegate() {
+                    user = UserLogin(user);
+                });
+
+            userLoginThread.Name = "userLoginThread";
+            userLoginThread.Start();
+            userLoginThread.Join();
+
+            if (user == null) {
+                ClientNameTextBox.ForeColor = System.Drawing.Color.Red;
+                ClientNameTextBox.Text = "User does not exist!";
+                return;
+            }
+
+            MenuLabel.Text = "Welcome " + user;
+            this.currentUser = new UserView(user, "ip", 0); //para debug
+            Button1.Enabled = true;
+            Button1.Text = "Create Event";
+            Button2.Text = "Known Users";
+            Button3.Text = "Get User Info";
+            Button3.Enabled = true;
+            BackToMainMenuButton.Enabled = true;
+            ClientNameLabel.Visible = false;
+            ClientNameTextBox.Text = "";
+            ClientNameTextBox.Visible = false;
+            ClientNameOKButton.Visible = false;
+            ClientNameOKButton.Enabled = false;
+            return;
+        }
+
+        private void Box2CloseButton_Click(object sender, EventArgs e) {
+            Box2Label.Text = "User's List:";
+            GroupBox2.Visible = false;
+        }
+
+
+
+        private void GetUserInfoLabelButton_Click(object sender, EventArgs e) {
+            String userName = GetUserInfoTextBox.Text;
+
+            ServerInterface remote = Server.Server.GetMaster(servers["Master"].Item2);
+
+            UserView user = remote.GetUserInformation(userName);
+
+            if (user == null) {
+                GetUserInfoTextBox.ForeColor = System.Drawing.Color.Red;
+                GetUserInfoTextBox.Text = "User does not exist";
+                GetUserInfoTextBox.ForeColor = System.Drawing.Color.Black;
+                return;
+            }
+
+            else {
+
+                String url = GetUser(userName);
+                UserInterface userProxy = (UserInterface)Activator.GetObject(typeof(UserInterface), url);
+                userProxy.AddNewKnownUsers(user.getName(), user.getPort(), user.getIPAddress());
+                GetUserInfoLabel.Visible = false;
+                GetUserInfoTextBox.Visible = false;
+                GetUserInfoLabelButton.Visible = false;
+            }
+        }
+
+
+        private void RegisterLink_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e) {
+            Box4.Visible = true;
+        }
+
+        private void RegistrationConfirmButton_Click(object sender, EventArgs e) {
+
+            /************************************************************************/
+            /* Calls remote method to register the user or server and closes the box
+            /************************************************************************/
+
+            String name = RegistrationUserNameTextBox.Text;
+            String ip = RegistrationIPTextBox.Text;
+            String port = RegistrationPortTextBox.Text;
+
+            //adicionar validacao de argumentos
+
+            if (currentMenu.Equals("Server")) {
+                Process p = new Process();
+                p.StartInfo.FileName = "C:\\Users\\Joao\\Documents\\Visual Studio 2010\\Projects\\Padi-Cal\\Server\\bin\\Debug\\Server.exe";
+                p.StartInfo.Arguments = String.Format("{0} {1}", name, port);
+                p.Start();
+                servers.Add(name, new Tuple<String, String>(ip, port));
+            }
+            else {
+                Process p = new Process();
+                p.StartInfo.FileName = "C:\\Users\\Joao\\Documents\\Visual Studio 2010\\Projects\\Padi-Cal\\User\\bin\\Debug\\User.exe";
+                p.StartInfo.Arguments = String.Format("{0} {1}", name, port);
+                p.Start();
+                users.Add(name, new Tuple<String, String>(ip, port));
+
+                ServerInterface remote = Server.Server.GetMaster(servers["Master"].Item2);
+
+                try {
+                    remote.RegisterUser(name, ip, port);
+                }
+                catch (DuplicateUserException ex) {
+                    RegistrationUserNameTextBox.Text = "Duplicated User: " + ex.getName();
+                    return;
+                }
+
+            }
+
+            RegistrationUserNameTextBox.Text = "";
+            RegistrationIPTextBox.Text = "";
+            RegistrationPortTextBox.Text = "";
+
+            Box4.Visible = false;
+
+        }
+
+        private void GetUserInformation() {
+            GetUserInfoLabel.Visible = true;
+            GetUserInfoLabelButton.Visible = true;
+            GetUserInfoLabelButton.Visible = true;
+            GetUserInfoTextBox.Visible = true;
+        }
+
+        private void FillUsersCheckList(String userName) {
+            String url = GetUser(userName);
+            UserInterface remote = (UserInterface)Activator.GetObject(typeof(UserInterface), url);
+
+            Dictionary<CommonTypes.UserView, int> knownUsers = remote.getKnownUsers();
+
+            List<CommonTypes.UserView> knownUsersList = knownUsers.Keys.ToList();
+
+            foreach (CommonTypes.UserView u in knownUsersList) {
+                UsersCheckBoxList.Items.Add(u.getName());
+            }
+
+            return;
+        }
+
+        private ReservationView GetReservationInfo(String userName) {
+
+            String url = GetUser(userName);
+            UserInterface remote = (UserInterface)Activator.GetObject(typeof(UserInterface), url);
+
+            Dictionary<CommonTypes.UserView, int> knownUsers = remote.getKnownUsers();
+
+            List<CommonTypes.UserView> knownUsersList = knownUsers.Keys.ToList();
+
+            String description = DescriptionTextBox.Text;
+
+            CheckedListBox.CheckedItemCollection objCheckedItem = UsersCheckBoxList.CheckedItems;
+            List<object> participantsAux = new List<object>();
+            if (objCheckedItem.Count > 0) {
+
+                for (int iCount = 0; iCount < objCheckedItem.Count; ++iCount) {
+                    participantsAux.Add(objCheckedItem[iCount]);
+                }
+            }
+
+            List<UserView> participants = new List<UserView>();
+
+            foreach (UserView u in knownUsersList) {
+                if (participantsAux.Contains(u.getName())) {
+                    participants.Add(u);
+                }
+            }
+
+
+            List<ReservationSlot> slots = new List<ReservationSlot>(); //TODO
+            ReservationView reservationInfo = new ReservationView(description, participants, slots, this.currentUser.getName());
+            this.reservationList.Add(reservationInfo);
+            return reservationInfo;
+        }
+
+        private String GetUser(String name) {
+            String port = users[name].Item2;
+
+            String location = String.Format(address, port, name);
+            return location;
+        }
+
+<<<<<<< HEAD
+        private String GetMaster()
+        {
+            String port =  servers["Master"].Item2;
+            return String.Format(address, port, "Master");
+        }
+
+        
+        private void GetUserInfoLabelButton_Click_1(object sender, EventArgs e)
+        {
+=======
+        private void GetUserInfoLabelButton_Click_1(object sender, EventArgs e) {
+>>>>>>> 8b1597aeb70796cf570af59fe53383f203614e2e
+            String userName = GetUserInfoTextBox.Text;
+
+            
+            ServerInterface remote = Server.Server.GetMaster(servers["Master"].Item2);
+
+            UserView user = remote.GetUserInformation(userName);
+
+            if (user == null) {
+                GetUserInfoTextBox.ForeColor = System.Drawing.Color.Red;
+                GetUserInfoTextBox.Text = "User does not exist";
+                GetUserInfoTextBox.ForeColor = System.Drawing.Color.Black;
+                return;
+            }
+
+            else {
+
+                String url = GetUser(this.currentUser.getName());
+                UserInterface userProxy = (UserInterface)Activator.GetObject(typeof(UserInterface), url);
+                userProxy.AddNewKnownUsers(user.getName(), user.getPort(), user.getIPAddress());
+                GetUserInfoLabel.Visible = false;
+                GetUserInfoTextBox.Visible = false;
+                GetUserInfoLabelButton.Visible = false;
+            }
+        }
+
+    }
+}
